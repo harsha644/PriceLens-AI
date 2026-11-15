@@ -2,7 +2,7 @@ from rest_framework import status, permissions
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
-from django.db.models import Min, Max
+from django.db.models import Min, Max, Avg
 from .models import Marketplace, MarketplaceListing, PriceHistory
 from .serializers import MarketplaceListingSerializer, PriceHistorySerializer
 from .adapters import get_marketplace_adapters
@@ -76,6 +76,67 @@ class ProductComparisonView(APIView):
                 'best_deal': best_deal,
                 'total_listings': len(listings_data),
             }
+        }, status=status.HTTP_200_OK)
+
+class ProductPriceHistoryView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, product_id):
+        product = get_object_or_404(Product, pk=product_id)
+        include_demo = request.query_params.get('include_demo', '').lower() in ['true', '1']
+        demo_only = request.query_params.get('is_demo', '').lower() in ['true', '1']
+
+        history_qs = product.price_history.select_related('listing__marketplace').all()
+        if demo_only:
+            history_qs = history_qs.filter(is_demo=True)
+        elif not include_demo:
+            history_qs = history_qs.filter(is_demo=False)
+
+        history_qs = history_qs.order_by('timestamp')
+
+        prices = [float(h.price) for h in history_qs]
+        current_price = prices[-1] if prices else None
+        lowest_price = min(prices) if prices else None
+        highest_price = max(prices) if prices else None
+        avg_price = round(sum(prices) / len(prices), 2) if prices else None
+
+        # Build timeline series by marketplace
+        series = []
+        amz_points = []
+        fk_points = []
+
+        for h in history_qs:
+            ts_iso = h.timestamp.isoformat()
+            ts_label = h.timestamp.strftime('%Y-%m-%d')
+            val = float(h.price)
+            code = h.listing.marketplace.code
+
+            series.append({
+                'timestamp': ts_iso,
+                'date': ts_label,
+                'price': val,
+                'marketplace': h.listing.marketplace.name,
+                'code': code,
+            })
+
+            if code == 'amazon_in':
+                amz_points.append({'date': ts_label, 'price': val})
+            elif code == 'flipkart':
+                fk_points.append({'date': ts_label, 'price': val})
+
+        return Response({
+            'product_id': product.id,
+            'product_name': product.name,
+            'stats': {
+                'current_price': current_price,
+                'lowest_price': lowest_price,
+                'highest_price': highest_price,
+                'average_price': avg_price,
+                'total_data_points': len(prices)
+            },
+            'series': series,
+            'amazon_series': amz_points,
+            'flipkart_series': fk_points,
         }, status=status.HTTP_200_OK)
 
 class MarketplaceSearchLiveView(APIView):
