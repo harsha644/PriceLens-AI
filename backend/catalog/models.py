@@ -1,5 +1,6 @@
 from django.db import models
 from django.core.exceptions import ValidationError
+from django.utils.text import slugify
 
 def validate_image_file(image):
     # Max size: 5MB
@@ -7,16 +8,40 @@ def validate_image_file(image):
     if filesize > 5 * 1024 * 1024:
         raise ValidationError("Maximum image file size is 5MB.")
 
+class ProductCategory(models.Model):
+    name = models.CharField(max_length=100, unique=True, db_index=True)
+    slug = models.SlugField(max_length=120, unique=True, blank=True)
+    description = models.TextField(blank=True, default='')
+    icon = models.CharField(max_length=50, blank=True, default='package')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name_plural = 'Product Categories'
+        ordering = ['name']
+
+    def save(self, *args, **kwargs):
+        if not self.slug:
+            self.slug = slugify(self.name)
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.name
+
 class Product(models.Model):
     name = models.CharField(max_length=255, db_index=True)
     brand = models.CharField(max_length=100, db_index=True)
     model = models.CharField(max_length=150, blank=True, default='')
-    category = models.CharField(max_length=100, db_index=True)
+    category = models.CharField(max_length=100, db_index=True) # Text category for fast indexing
+    category_rel = models.ForeignKey(ProductCategory, on_delete=models.SET_NULL, null=True, blank=True, related_name='products')
     model_number = models.CharField(max_length=100, blank=True, default='', db_index=True)
     variant = models.CharField(max_length=100, blank=True, default='')
     ram = models.CharField(max_length=50, blank=True, default='')
     storage = models.CharField(max_length=50, blank=True, default='')
     colour = models.CharField(max_length=50, blank=True, default='')
+    # Universal product fields for any category
+    size = models.CharField(max_length=50, blank=True, default='')
+    material = models.CharField(max_length=100, blank=True, default='')
+    specifications = models.JSONField(default=dict, blank=True)
     is_demo = models.BooleanField(default=False, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -26,6 +51,7 @@ class Product(models.Model):
             models.Index(fields=['brand', 'category']),
             models.Index(fields=['brand', 'model_number']),
             models.Index(fields=['is_demo', 'name']),
+            models.Index(fields=['category', 'is_demo']),
         ]
 
     def clean(self):
@@ -50,7 +76,7 @@ class Product(models.Model):
 
     def __str__(self):
         desc = f"{self.brand} {self.name}"
-        extras = [x for x in [self.variant, self.ram, self.storage, self.colour] if x]
+        extras = [x for x in [self.variant, self.ram, self.storage, self.colour, self.size] if x]
         if extras:
             desc += f" ({', '.join(extras)})"
         return desc

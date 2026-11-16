@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 from datetime import timedelta
 from decouple import Config, RepositoryEnv
+import sys
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -68,7 +69,8 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'pricelens.wsgi.application'
 
-# Database: MySQL only
+
+
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.mysql',

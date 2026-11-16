@@ -1,4 +1,5 @@
 import io
+import re
 import pandas as pd
 from decimal import Decimal
 from rest_framework import status, permissions
@@ -7,8 +8,72 @@ from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
 from .models import ProductReview, ReviewAnalysis
 from .serializers import ProductReviewSerializer, ManualReviewCreateSerializer, ReviewAnalysisSerializer
-from .services import ReviewAnalysisService
+from .services import ReviewAnalysisService, STOP_WORDS
 from catalog.models import Product
+from textblob import TextBlob
+
+class ReviewAnalyzePostView(APIView):
+    """
+    POST /api/reviews/analyze/
+    Analyzes reviews for a specific product ID or directly analyzes raw text/reviews.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        product_id = request.data.get('product_id')
+        review_text = request.data.get('review_text')
+
+        if product_id:
+            product = get_object_or_404(Product, pk=product_id)
+            include_demo = request.data.get('include_demo', True)
+            analysis = ReviewAnalysisService.analyze_product_reviews(product, include_demo=include_demo)
+            return Response(ReviewAnalysisSerializer(analysis).data, status=status.HTTP_200_OK)
+
+        elif review_text:
+            # Direct text sentiment analysis
+            full_text = str(review_text).strip()
+            vader_score = ReviewAnalysisService.vader.polarity_scores(full_text)['compound']
+            tb_score = TextBlob(full_text).sentiment.polarity
+            combined = round((vader_score * 0.7) + (tb_score * 0.3), 3)
+
+            sentiment = "positive" if combined >= 0.05 else ("negative" if combined <= -0.05 else "neutral")
+            tokens = [t for t in re.findall(r'\b[a-zA-Z]{3,}\b', full_text.lower()) if t not in STOP_WORDS]
+
+            rating_input = float(request.data.get('rating', 5.0))
+            mismatch = False
+            if rating_input >= 4.0 and combined <= -0.2:
+                mismatch = True
+            elif rating_input <= 2.0 and combined >= 0.2:
+                mismatch = True
+
+            return Response({
+                'text': full_text,
+                'sentiment': sentiment,
+                'sentiment_score': combined,
+                'rating_sentiment_mismatch': mismatch,
+                'keywords': tokens[:10],
+                'note': 'VADER + TextBlob NLP analysis completed successfully.'
+            }, status=status.HTTP_200_OK)
+
+        return Response({'error': 'Either "product_id" or "review_text" is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+class ReviewCSVUploadGlobalView(APIView):
+    """
+    POST /api/reviews/upload-csv/
+    Global review CSV upload accepting optional product_id.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        product_id = request.data.get('product_id') or request.query_params.get('product_id')
+        if not product_id:
+            first_product = Product.objects.first()
+            if not first_product:
+                return Response({'error': 'No products in catalog. Create or confirm a product first.'}, status=status.HTTP_400_BAD_REQUEST)
+            product_id = first_product.id
+
+        view = ReviewCSVUploadView()
+        return view.post(request, product_id)
 
 class ProductReviewListView(APIView):
     permission_classes = [permissions.IsAuthenticated]
@@ -31,7 +96,6 @@ class ProductReviewListView(APIView):
         product = get_object_or_404(Product, pk=product_id)
         is_demo = request.data.get('is_demo', False)
 
-        # Allow single or bulk array
         data = request.data.get('reviews') if 'reviews' in request.data else request.data
         if isinstance(data, list):
             created_reviews = []
@@ -50,7 +114,6 @@ class ProductReviewListView(APIView):
                         is_demo=is_demo
                     )
                     created_reviews.append(rev)
-            # Re-run analysis
             ReviewAnalysisService.analyze_product_reviews(product, include_demo=True)
             return Response({'message': f'Successfully added {len(created_reviews)} reviews.'}, status=status.HTTP_201_CREATED)
         else:
@@ -88,10 +151,8 @@ class ReviewCSVUploadView(APIView):
         except Exception as e:
             return Response({'error': f'Failed to parse CSV file: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Normalize column names
         df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
 
-        # Identify required columns
         text_col = None
         for col in ['review_text', 'text', 'comment', 'review', 'body']:
             if col in df.columns:
@@ -141,7 +202,6 @@ class ReviewCSVUploadView(APIView):
             )
             imported_count += 1
 
-        # Automatically update analysis
         analysis = ReviewAnalysisService.analyze_product_reviews(product, include_demo=True)
         return Response({
             'message': f'Successfully ingested {imported_count} reviews from CSV.',
